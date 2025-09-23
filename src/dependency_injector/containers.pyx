@@ -1,17 +1,11 @@
 """Containers module."""
 
+import asyncio
 import contextlib
 import copy as copy_module
 import json
-import sys
 import importlib
 import inspect
-import warnings
-
-try:
-    import asyncio
-except ImportError:
-    asyncio = None
 
 try:
     import yaml
@@ -20,40 +14,40 @@ except ImportError:
 
 from . import providers, errors
 from .providers cimport __is_future_or_coroutine
-
-
-if sys.version_info[:2] >= (3, 6):
-    from .wiring import wire, unwire
-else:
-    def wire(*args, **kwargs):
-        raise NotImplementedError("Wiring requires Python 3.6 or above")
-
-    def unwire(*args, **kwargs):
-        raise NotImplementedError("Wiring requires Python 3.6 or above")
-
-if sys.version_info[:2] == (3, 5):
-    warnings.warn(
-        "Dependency Injector will drop support of Python 3.5 after Jan 1st of 2022. "
-        "This does not mean that there will be any immediate breaking changes, "
-        "but tests will no longer be executed on Python 3.5, and bugs will not be addressed.",
-        category=DeprecationWarning,
-    )
+from .wiring import wire, unwire
 
 
 class WiringConfiguration:
     """Container wiring configuration."""
 
-    def __init__(self, modules=None, packages=None, from_package=None, auto_wire=True):
+    def __init__(
+        self,
+        modules=None,
+        packages=None,
+        from_package=None,
+        auto_wire=True,
+        keep_cache=False,
+        warn_unresolved=False,
+    ):
         self.modules = [*modules] if modules else []
         self.packages = [*packages] if packages else []
         self.from_package = from_package
         self.auto_wire = auto_wire
+        self.keep_cache = keep_cache
+        self.warn_unresolved = warn_unresolved
 
     def __deepcopy__(self, memo=None):
-        return self.__class__(self.modules, self.packages, self.from_package, self.auto_wire)
+        return self.__class__(
+            self.modules,
+            self.packages,
+            self.from_package,
+            self.auto_wire,
+            self.keep_cache,
+            self.warn_unresolved,
+        )
 
 
-class Container(object):
+class Container:
     """Abstract container."""
 
 
@@ -281,7 +275,14 @@ class DynamicContainer(Container):
         """Check if auto wiring is needed."""
         return self.wiring_config.auto_wire is True
 
-    def wire(self, modules=None, packages=None, from_package=None):
+    def wire(
+        self,
+        modules=None,
+        packages=None,
+        from_package=None,
+        keep_cache=None,
+        warn_unresolved=False,
+    ):
         """Wire container providers with provided packages and modules.
 
         :rtype: None
@@ -312,10 +313,15 @@ class DynamicContainer(Container):
         if not modules and not packages:
             return
 
+        if keep_cache is None:
+            keep_cache = self.wiring_config.keep_cache
+
         wire(
             container=self,
             modules=modules,
             packages=packages,
+            keep_cache=keep_cache,
+            warn_unresolved=warn_unresolved,
         )
 
         if modules:
@@ -333,11 +339,15 @@ class DynamicContainer(Container):
         self.wired_to_modules.clear()
         self.wired_to_packages.clear()
 
-    def init_resources(self):
+    def init_resources(self, resource_type=providers.Resource):
         """Initialize all container resources."""
+
+        if not issubclass(resource_type, providers.Resource):
+            raise TypeError("resource_type must be a subclass of Resource provider")
+
         futures = []
 
-        for provider in self.traverse(types=[providers.Resource]):
+        for provider in self.traverse(types=[resource_type]):
             resource = provider.init()
 
             if __is_future_or_coroutine(resource):
@@ -346,8 +356,12 @@ class DynamicContainer(Container):
         if futures:
             return asyncio.gather(*futures)
 
-    def shutdown_resources(self):
+    def shutdown_resources(self, resource_type=providers.Resource):
         """Shutdown all container resources."""
+
+        if not issubclass(resource_type, providers.Resource):
+            raise TypeError("resource_type must be a subclass of Resource provider")
+
         def _independent_resources(resources):
             for resource in resources:
                 for other_resource in resources:
@@ -378,7 +392,7 @@ class DynamicContainer(Container):
                 for resource in resources_to_shutdown:
                     resource.shutdown()
 
-        resources = list(self.traverse(types=[providers.Resource]))
+        resources = list(self.traverse(types=[resource_type]))
         if any(resource.is_async_mode_enabled() for resource in resources):
             return _async_ordered_shutdown(resources)
         else:

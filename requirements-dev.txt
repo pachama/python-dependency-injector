@@ -1,4 +1,4 @@
-cython==3.0.11
+cython==3.1.4
 setuptools
 pytest
 pytest-asyncio
@@ -13,10 +13,13 @@ mypy
 pyyaml
 httpx
 fastapi
-pydantic==1.10.17
+pydantic
+pydantic-settings
 numpy
 scipy
 boto3
 mypy_boto3_s3
+typing_extensions
+fast-depends
 
 -r requirements-ext.txt

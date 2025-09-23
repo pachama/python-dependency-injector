@@ -2,6 +2,8 @@
 
 from __future__ import absolute_import
 
+import asyncio
+import builtins
 import copy
 import errno
 import functools
@@ -12,36 +14,26 @@ import os
 import re
 import sys
 import threading
-import types
 import warnings
+from asyncio import ensure_future
+from configparser import ConfigParser as IniConfigParser
+from contextlib import asynccontextmanager, contextmanager
+from contextvars import ContextVar
+from inspect import isasyncgenfunction, isgeneratorfunction
 
 try:
-    import contextvars
+    from inspect import _is_coroutine_mark as _is_coroutine_marker
 except ImportError:
-    contextvars = None
-
-try:
-    import builtins
-except ImportError:
-    # Python 2.7
-    import __builtin__ as builtins
-
-try:
-    import asyncio
-except ImportError:
-    asyncio = None
-    _is_coroutine_marker = None
-else:
-    if sys.version_info >= (3, 5, 3):
-        import asyncio.coroutines
-        _is_coroutine_marker = asyncio.coroutines._is_coroutine
-    else:
+    try:
+        # Python >=3.12.0,<3.12.5
+        from inspect import _is_coroutine_marker
+    except ImportError:
         _is_coroutine_marker = True
 
 try:
-    import ConfigParser as iniconfigparser
+    from asyncio.coroutines import _is_coroutine
 except ImportError:
-    import configparser as iniconfigparser
+    _is_coroutine = True
 
 try:
     import yaml
@@ -77,29 +69,11 @@ from .errors import (
 cimport cython
 
 
-if sys.version_info[0] == 3:  # pragma: no cover
-    CLASS_TYPES = (type,)
-else:  # pragma: no cover
-    CLASS_TYPES = (type, types.ClassType)
-
-    copy._deepcopy_dispatch[types.MethodType] = \
-        lambda obj, memo: type(obj)(obj.im_func,
-                                    copy.deepcopy(obj.im_self, memo),
-                                    obj.im_class)
-
-if sys.version_info[:2] == (3, 5):
-    warnings.warn(
-        "Dependency Injector will drop support of Python 3.5 after Jan 1st of 2022. "
-        "This does not mean that there will be any immediate breaking changes, "
-        "but tests will no longer be executed on Python 3.5, and bugs will not be addressed.",
-        category=DeprecationWarning,
-    )
-
 config_env_marker_pattern = re.compile(
     r"\${(?P<name>[^}^{:]+)(?P<separator>:?)(?P<default>.*?)}",
 )
 
-def _resolve_config_env_markers(config_content, envs_required=False):
+cdef str _resolve_config_env_markers(config_content: str, envs_required: bool):
     """Replace environment variable markers with their values."""
     findings = list(config_env_marker_pattern.finditer(config_content))
 
@@ -118,28 +92,19 @@ def _resolve_config_env_markers(config_content, envs_required=False):
     return config_content
 
 
-if sys.version_info[0] == 3:
-    def _parse_ini_file(filepath, envs_required=False):
-        parser = iniconfigparser.ConfigParser()
-        with open(filepath) as config_file:
-            config_string = _resolve_config_env_markers(
-                config_file.read(),
-                envs_required=envs_required,
-            )
-        parser.read_string(config_string)
-        return parser
-else:
-    import StringIO
+cdef object _parse_ini_file(filepath, envs_required: bool | None):
+    parser = IniConfigParser()
 
-    def _parse_ini_file(filepath, envs_required=False):
-        parser = iniconfigparser.ConfigParser()
-        with open(filepath) as config_file:
+    with open(filepath) as config_file:
+        config_string = config_file.read()
+
+        if envs_required is not None:
             config_string = _resolve_config_env_markers(
-                config_file.read(),
+                config_string,
                 envs_required=envs_required,
             )
-        parser.readfp(StringIO.StringIO(config_string))
-        return parser
+    parser.read_string(config_string)
+    return parser
 
 
 if yaml:
@@ -163,7 +128,7 @@ cdef int ASYNC_MODE_ENABLED = 1
 cdef int ASYNC_MODE_DISABLED = 2
 
 cdef set __iscoroutine_typecache = set()
-cdef tuple __COROUTINE_TYPES = asyncio.coroutines._COROUTINE_TYPES if asyncio else tuple()
+cdef tuple __COROUTINE_TYPES = asyncio.coroutines._COROUTINE_TYPES
 
 cdef dict pydantic_settings_to_dict(settings, dict kwargs):
     if not has_pydantic_settings:
@@ -173,7 +138,7 @@ cdef dict pydantic_settings_to_dict(settings, dict kwargs):
             f"\"pip install dependency-injector[{pydantic_extra}]\""
         )
 
-    if isinstance(settings, CLASS_TYPES) and issubclass(settings, PydanticSettings):
+    if isinstance(settings, type) and issubclass(settings, PydanticSettings):
         raise Error(
             "Got settings class, but expect instance: "
             "instead \"{0}\" use \"{0}()\"".format(settings.__name__)
@@ -191,7 +156,7 @@ cdef dict pydantic_settings_to_dict(settings, dict kwargs):
     return settings.model_dump(mode="python", **kwargs)
 
 
-cdef class Provider(object):
+cdef class Provider:
     """Base provider class.
 
     :py:class:`Provider` is callable (implements ``__call__`` method). Every
@@ -913,12 +878,9 @@ cdef class Dependency(Provider):
 
     def set_instance_of(self, instance_of):
         """Set type."""
-        if not isinstance(instance_of, CLASS_TYPES):
+        if not isinstance(instance_of, type):
             raise TypeError(
-                "\"instance_of\" has incorrect type (expected {0}, got {1}))".format(
-                    CLASS_TYPES,
-                    instance_of,
-                ),
+                f"\"instance_of\" is not a class (got {instance_of!r}))",
             )
         self._instance_of = instance_of
         return self
@@ -1475,12 +1437,11 @@ cdef class Coroutine(Callable):
         some_coroutine.add_kwargs(keyword_argument1=3, keyword_argument=4)
     """
 
-    _is_coroutine = _is_coroutine_marker
+    _is_coroutine_marker = _is_coroutine_marker  # Python >=3.12
+    _is_coroutine = _is_coroutine  # Python <3.16
 
     def set_provides(self, provides):
         """Set provider provides."""
-        if not asyncio:
-            raise Error("Package asyncio is not available")
         provides = _resolve_string_import(provides)
         if provides and not asyncio.iscoroutinefunction(provides):
             raise Error(f"Provider {_class_qualname(self)} expected to get coroutine function, "
@@ -1634,12 +1595,11 @@ cdef class ConfigurationOption(Provider):
             segment() if is_provider(segment) else segment for segment in self._name
         )
 
-    @property
-    def root(self):
+    def _get_root(self):
         return self._root
 
     def get_name(self):
-        return ".".join((self._root.get_name(), self._get_self_name()))
+        return f"{self._root.get_name()}.{self._get_self_name()}"
 
     def get_name_segments(self):
         return self._name
@@ -1713,7 +1673,7 @@ cdef class ConfigurationOption(Provider):
         try:
             parser = _parse_ini_file(
                 filepath,
-                envs_required=envs_required if envs_required is not UNDEFINED else self._is_strict_mode_enabled(),
+                envs_required if envs_required is not UNDEFINED else self._is_strict_mode_enabled(),
             )
         except IOError as exception:
             if required is not False \
@@ -1772,10 +1732,11 @@ cdef class ConfigurationOption(Provider):
                 raise
             return
 
-        config_content = _resolve_config_env_markers(
-            config_content,
-            envs_required=envs_required if envs_required is not UNDEFINED else self._is_strict_mode_enabled(),
-        )
+        if envs_required is not None:
+            config_content = _resolve_config_env_markers(
+                config_content,
+                envs_required if envs_required is not UNDEFINED else self._is_strict_mode_enabled(),
+            )
         config = yaml.load(config_content, loader)
 
         current_config = self.__call__()
@@ -1810,10 +1771,11 @@ cdef class ConfigurationOption(Provider):
                 raise
             return
 
-        config_content = _resolve_config_env_markers(
-            config_content,
-            envs_required=envs_required if envs_required is not UNDEFINED else self._is_strict_mode_enabled(),
-        )
+        if envs_required is not None:
+            config_content = _resolve_config_env_markers(
+                config_content,
+                envs_required if envs_required is not UNDEFINED else self._is_strict_mode_enabled(),
+            )
         config = json.loads(config_content)
 
         current_config = self.__call__()
@@ -2266,7 +2228,7 @@ cdef class Configuration(Object):
         try:
             parser = _parse_ini_file(
                 filepath,
-                envs_required=envs_required if envs_required is not UNDEFINED else self._is_strict_mode_enabled(),
+                envs_required if envs_required is not UNDEFINED else self._is_strict_mode_enabled(),
             )
         except IOError as exception:
             if required is not False \
@@ -2325,10 +2287,11 @@ cdef class Configuration(Object):
                 raise
             return
 
-        config_content = _resolve_config_env_markers(
-            config_content,
-            envs_required=envs_required if envs_required is not UNDEFINED else self._is_strict_mode_enabled(),
-        )
+        if envs_required is not None:
+            config_content = _resolve_config_env_markers(
+                config_content,
+                envs_required if envs_required is not UNDEFINED else self._is_strict_mode_enabled(),
+            )
         config = yaml.load(config_content, loader)
 
         current_config = self.__call__()
@@ -2363,10 +2326,11 @@ cdef class Configuration(Object):
                 raise
             return
 
-        config_content = _resolve_config_env_markers(
-            config_content,
-            envs_required=envs_required if envs_required is not UNDEFINED else self._is_strict_mode_enabled(),
-        )
+        if envs_required is not None:
+            config_content = _resolve_config_env_markers(
+                config_content,
+                envs_required if envs_required is not UNDEFINED else self._is_strict_mode_enabled(),
+            )
         config = json.loads(config_content)
 
         current_config = self.__call__()
@@ -3262,15 +3226,10 @@ cdef class ContextLocalSingleton(BaseSingleton):
         :param provides: Provided type.
         :type provides: type
         """
-        if not contextvars:
-            raise RuntimeError(
-                "Contextvars library not found. This provider "
-                "requires Python 3.7 or a backport of contextvars. "
-                "To install a backport run \"pip install contextvars\"."
-            )
+
 
         super(ContextLocalSingleton, self).__init__(provides, *args, **kwargs)
-        self._storage = contextvars.ContextVar("_storage", default=self._none)
+        self._storage = ContextVar("_storage", default=self._none)
 
     def reset(self):
         """Reset cached instance, if any.
@@ -3642,6 +3601,17 @@ cdef class Dict(Provider):
         return __provide_keyword_args(kwargs, self._kwargs, self._kwargs_len, self._async_mode)
 
 
+@cython.no_gc
+cdef class NullAwaitable:
+    def __next__(self):
+        raise StopIteration from None
+
+    def __await__(self):
+        return self
+
+
+cdef NullAwaitable NULL_AWAITABLE = NullAwaitable()
+
 
 cdef class Resource(Provider):
     """Resource provider provides a component with initialization and shutdown."""
@@ -3697,6 +3667,12 @@ cdef class Resource(Provider):
     def set_provides(self, provides):
         """Set provider provides."""
         provides = _resolve_string_import(provides)
+
+        if isasyncgenfunction(provides):
+            provides = asynccontextmanager(provides)
+        elif isgeneratorfunction(provides):
+            provides = contextmanager(provides)
+
         self._provides = provides
         return self
 
@@ -3797,28 +3773,21 @@ cdef class Resource(Provider):
         """Shutdown resource."""
         if not self._initialized:
             if self._async_mode == ASYNC_MODE_ENABLED:
-                result = asyncio.Future()
-                result.set_result(None)
-                return result
+                return NULL_AWAITABLE
             return
 
         if self._shutdowner:
-            try:
-                shutdown = self._shutdowner(self._resource)
-            except StopIteration:
-                pass
-            else:
-                if inspect.isawaitable(shutdown):
-                    return self._create_shutdown_future(shutdown)
+            future = self._shutdowner(None, None, None)
+
+            if __is_future_or_coroutine(future):
+                return ensure_future(self._shutdown_async(future))
 
         self._resource = None
         self._initialized = False
         self._shutdowner = None
 
         if self._async_mode == ASYNC_MODE_ENABLED:
-            result = asyncio.Future()
-            result.set_result(None)
-            return result
+            return NULL_AWAITABLE
 
     @property
     def related(self):
@@ -3828,168 +3797,74 @@ cdef class Resource(Provider):
         yield from filter(is_provider, self.kwargs.values())
         yield from super().related
 
+    async def _shutdown_async(self, future) -> None:
+        try:
+            await future
+        finally:
+            self._resource = None
+            self._initialized = False
+            self._shutdowner = None
+
+    async def _handle_async_cm(self, obj) -> None:
+        try:
+            self._resource = resource = await obj.__aenter__()
+            self._shutdowner = obj.__aexit__
+            return resource
+        except:
+            self._initialized = False
+            raise
+
+    async def _provide_async(self, future) -> None:
+        try:
+            obj = await future
+
+            if hasattr(obj, '__aenter__') and hasattr(obj, '__aexit__'):
+                self._resource = await obj.__aenter__()
+                self._shutdowner = obj.__aexit__
+            elif hasattr(obj, '__enter__') and hasattr(obj, '__exit__'):
+                self._resource = obj.__enter__()
+                self._shutdowner = obj.__exit__
+            else:
+                self._resource = obj
+                self._shutdowner = None
+
+            return self._resource
+        except:
+            self._initialized = False
+            raise
+
     cpdef object _provide(self, tuple args, dict kwargs):
         if self._initialized:
             return self._resource
 
-        if self._is_resource_subclass(self._provides):
-            initializer = self._provides()
-            self._resource = __call(
-                initializer.init,
-                args,
-                self._args,
-                self._args_len,
-                kwargs,
-                self._kwargs,
-                self._kwargs_len,
-                self._async_mode,
-            )
-            self._shutdowner = initializer.shutdown
-        elif self._is_async_resource_subclass(self._provides):
-            initializer = self._provides()
-            async_init = __call(
-                initializer.init,
-                args,
-                self._args,
-                self._args_len,
-                kwargs,
-                self._kwargs,
-                self._kwargs_len,
-                self._async_mode,
-            )
+        obj = __call(
+            self._provides,
+            args,
+            self._args,
+            self._args_len,
+            kwargs,
+            self._kwargs,
+            self._kwargs_len,
+            self._async_mode,
+        )
+
+        if __is_future_or_coroutine(obj):
             self._initialized = True
-            return self._create_init_future(async_init, initializer.shutdown)
-        elif inspect.isgeneratorfunction(self._provides):
-            initializer = __call(
-                self._provides,
-                args,
-                self._args,
-                self._args_len,
-                kwargs,
-                self._kwargs,
-                self._kwargs_len,
-                self._async_mode,
-            )
-            self._resource = next(initializer)
-            self._shutdowner = initializer.send
-        elif iscoroutinefunction(self._provides):
-            initializer = __call(
-                self._provides,
-                args,
-                self._args,
-                self._args_len,
-                kwargs,
-                self._kwargs,
-                self._kwargs_len,
-                self._async_mode,
-            )
+            self._resource = resource = ensure_future(self._provide_async(obj))
+            return resource
+        elif hasattr(obj, '__enter__') and hasattr(obj, '__exit__'):
+            self._resource = obj.__enter__()
+            self._shutdowner = obj.__exit__
+        elif hasattr(obj, '__aenter__') and hasattr(obj, '__aexit__'):
             self._initialized = True
-            return self._create_init_future(initializer)
-        elif isasyncgenfunction(self._provides):
-            initializer = __call(
-                self._provides,
-                args,
-                self._args,
-                self._args_len,
-                kwargs,
-                self._kwargs,
-                self._kwargs_len,
-                self._async_mode,
-            )
-            self._initialized = True
-            return self._create_async_gen_init_future(initializer)
-        elif callable(self._provides):
-            self._resource = __call(
-                self._provides,
-                args,
-                self._args,
-                self._args_len,
-                kwargs,
-                self._kwargs,
-                self._kwargs_len,
-                self._async_mode,
-            )
+            self._resource = resource = ensure_future(self._handle_async_cm(obj))
+            return resource
         else:
-            raise Error("Unknown type of resource initializer")
+            self._resource = obj
+            self._shutdowner = None
 
         self._initialized = True
         return self._resource
-
-    def _create_init_future(self, future, shutdowner=None):
-        callback = self._async_init_callback
-        if shutdowner:
-            callback = functools.partial(callback, shutdowner=shutdowner)
-
-        future = asyncio.ensure_future(future)
-        future.add_done_callback(callback)
-        self._resource = future
-
-        return future
-
-    def _create_async_gen_init_future(self, initializer):
-        if inspect.isasyncgen(initializer):
-            return self._create_init_future(initializer.__anext__(), initializer.asend)
-
-        future = asyncio.Future()
-
-        create_initializer = asyncio.ensure_future(initializer)
-        create_initializer.add_done_callback(functools.partial(self._async_create_gen_callback, future))
-        self._resource = future
-
-        return future
-
-    def _async_init_callback(self, initializer, shutdowner=None):
-        try:
-            resource = initializer.result()
-        except Exception:
-            self._initialized = False
-        else:
-            self._resource = resource
-            self._shutdowner = shutdowner
-
-    def _async_create_gen_callback(self, future, initializer_future):
-        initializer = initializer_future.result()
-        init_future = self._create_init_future(initializer.__anext__(), initializer.asend)
-        init_future.add_done_callback(functools.partial(self._async_trigger_result, future))
-
-    def _async_trigger_result(self, future, future_result):
-        future.set_result(future_result.result())
-
-    def _create_shutdown_future(self, shutdown_future):
-        future = asyncio.Future()
-        shutdown_future = asyncio.ensure_future(shutdown_future)
-        shutdown_future.add_done_callback(functools.partial(self._async_shutdown_callback, future))
-        return future
-
-    def _async_shutdown_callback(self, future_result, shutdowner):
-        try:
-            shutdowner.result()
-        except StopAsyncIteration:
-            pass
-
-        self._resource = None
-        self._initialized = False
-        self._shutdowner = None
-
-        future_result.set_result(None)
-
-    @staticmethod
-    def _is_resource_subclass(instance):
-        if  sys.version_info < (3, 5):
-            return False
-        if not isinstance(instance, CLASS_TYPES):
-            return
-        from . import resources
-        return issubclass(instance, resources.Resource)
-
-    @staticmethod
-    def _is_async_resource_subclass(instance):
-        if  sys.version_info < (3, 5):
-            return False
-        if not isinstance(instance, CLASS_TYPES):
-            return
-        from . import resources
-        return issubclass(instance, resources.AsyncResource)
 
 
 cdef class Container(Provider):
@@ -4644,7 +4519,7 @@ cdef class MethodCaller(Provider):
             future_result.set_result(result)
 
 
-cdef class Injection(object):
+cdef class Injection:
     """Abstract injection class."""
 
 
@@ -4771,7 +4646,7 @@ cpdef tuple parse_named_injections(dict kwargs):
     return tuple(injections)
 
 
-cdef class OverridingContext(object):
+cdef class OverridingContext:
     """Provider overriding context.
 
     :py:class:`OverridingContext` is used by :py:meth:`Provider.override` for
@@ -4807,7 +4682,7 @@ cdef class OverridingContext(object):
         self._overridden.reset_last_overriding()
 
 
-cdef class BaseSingletonResetContext(object):
+cdef class BaseSingletonResetContext:
 
     def __init__(self, Provider provider):
         self._singleton = provider
@@ -4843,7 +4718,7 @@ cpdef bint is_provider(object instance):
 
     :rtype: bool
     """
-    return (not isinstance(instance, CLASS_TYPES) and
+    return (not isinstance(instance, type) and
             getattr(instance, "__IS_PROVIDER__", False) is True)
 
 
@@ -4871,7 +4746,7 @@ cpdef bint is_delegated(object instance):
 
     :rtype: bool
     """
-    return (not isinstance(instance, CLASS_TYPES) and
+    return (not isinstance(instance, type) and
             getattr(instance, "__IS_DELEGATED__", False) is True)
 
 
@@ -4902,7 +4777,7 @@ cpdef bint is_container_instance(object instance):
 
     :rtype: bool
     """
-    return (not isinstance(instance, CLASS_TYPES) and
+    return (not isinstance(instance, type) and
             getattr(instance, "__IS_CONTAINER__", False) is True)
 
 
@@ -4914,7 +4789,7 @@ cpdef bint is_container_class(object instance):
 
     :rtype: bool
     """
-    return (isinstance(instance, CLASS_TYPES) and
+    return (isinstance(instance, type) and
             getattr(instance, "__IS_CONTAINER__", False) is True)
 
 
@@ -5037,14 +4912,6 @@ def iscoroutinefunction(obj):
     """Check if object is a coroutine function."""
     try:
         return inspect.iscoroutinefunction(obj)
-    except AttributeError:
-        return False
-
-
-def isasyncgenfunction(obj):
-    """Check if object is an asynchronous generator function."""
-    try:
-        return inspect.isasyncgenfunction(obj)
     except AttributeError:
         return False
 

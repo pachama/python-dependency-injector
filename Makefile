@@ -1,6 +1,10 @@
 VERSION := $(shell python setup.py --version)
 
 export COVERAGE_RCFILE := pyproject.toml
+export CIBW_ENVIRONMENT_PASS_LINUX := CFLAGS PIP_CONFIG_SETTINGS DEPENDENCY_INJECTOR_LIMITED_API
+export PIP_CONFIG_SETTINGS ?= build_ext=-j4
+export DEPENDENCY_INJECTOR_LIMITED_API ?= 1
+export CFLAGS ?= -g0
 
 clean:
 	# Clean sources
@@ -36,7 +40,7 @@ uninstall:
 test:
 	# Unit tests with coverage report
 	coverage erase
-	coverage run -m pytest -c tests/.configs/pytest.ini
+	coverage run -m pytest
 	coverage report
 	coverage html
 
@@ -63,3 +67,6 @@ publish:
 	# Create and upload tag
 	git tag -a $(VERSION) -m 'version $(VERSION)'
 	git push --tags
+
+wheels:
+	cibuildwheel --output-dir wheelhouse
