@@ -7,6 +7,68 @@ that were made in every particular version.
 From version 0.7.6 *Dependency Injector* framework strictly
 follows `Semantic versioning`_
 
+4.48.2
+------
+
+- Add ``warn_unresolved=True`` to ``WiringConfiguration`` and ``container.wire()``
+  to produce warnings on unresolved string identifiers.
+- ABI3 wheels are now built only for CPython version >=3.10 (see issue `#919 <https://github.com/ets-labs/python-dependency-injector/issues/919>`_).
+
+4.48.1
+------
+
+* Improve performance of ``dependency_injector._cwiring.DependencyResolver``
+* Add ``typing-extensions`` as a dependency for older Python versions (<3.11)
+* Produce warning on ``@inject``s without ``Provide[...]`` marks
+* Add support for `resource_type` in ``Lifespan``s
+
+4.48.0
+------
+
+- Improve performance of wiring (`#897 <https://github.com/ets-labs/python-dependency-injector/pull/897>`_)
+- Add Context Manager support to Resource provider (`#899 <https://github.com/ets-labs/python-dependency-injector/pull/899>`_)
+- Add support for async generator injections (`#900 <https://github.com/ets-labs/python-dependency-injector/pull/900>`_)
+- Fix unintended dependency on ``typing_extensions`` (`#902 <https://github.com/ets-labs/python-dependency-injector/pull/902>`_)
+- Add support for Fast Depends (`#898 <https://github.com/ets-labs/python-dependency-injector/pull/898>`_)
+- Add ``resource_type`` parameter to init and shutdown resources using specialized providers (`#858 <https://github.com/ets-labs/python-dependency-injector/pull/858>`_)
+
+4.47.1
+------
+
+- Fix typing for wiring marker (`#892 <https://github.com/ets-labs/python-dependency-injector/pull/896>`_)
+- Strip debug symbols in wheels
+
+4.47.0
+------
+
+- Add support for ``Annotated`` type for module and class attribute injection in wiring,
+  with updated documentation and examples.
+  See discussion:
+  https://github.com/ets-labs/python-dependency-injector/pull/721#issuecomment-2025263718
+- Fix ``root`` property shadowing in ``ConfigurationOption`` (`#875 <https://github.com/ets-labs/python-dependency-injector/pull/875>`_)
+- Fix incorrect monkeypatching during ``wire()`` that could violate MRO in some classes (`#886 <https://github.com/ets-labs/python-dependency-injector/pull/886>`_)
+- ABI3 wheels are now published for CPython.
+- Drop support of Python 3.7.
+
+4.46.0
+------
+
+- Add option to disable env var interpolation in configs (`#861 <https://github.com/ets-labs/python-dependency-injector/pull/861>`_)
+- Fix ``Closing`` dependency resolution (`#852 <https://github.com/ets-labs/python-dependency-injector/pull/852>`_)
+- Add support for ``inspect.iscoroutinefunction()`` in ``Coroutine`` provider (`#830 <https://github.com/ets-labs/python-dependency-injector/pull/830>`_)
+- Fix broken wiring of sync inject-decorated methods (`#673 <https://github.com/ets-labs/python-dependency-injector/pull/673>`_)
+- Add support for ``typing.Annotated`` (`#721 <https://github.com/ets-labs/python-dependency-injector/pull/721>`_, `#853 <https://github.com/ets-labs/python-dependency-injector/pull/853>`_)
+- Documentation updates for movie-lister example (`#747 <https://github.com/ets-labs/python-dependency-injector/pull/747>`_)
+- Fix type propagation in ``Provider.provider`` (`#744 <https://github.com/ets-labs/python-dependency-injector/pull/744>`_)
+
+Many thanks for the contributions to:
+- `ZipFile <https://github.com/ZipFile>`_
+- `Yegor Statkevich <https://github.com/jazzthief>`_
+- `Federico Tomasi <https://github.com/federinik>`_
+- `Martin Lafrance <https://github.com/martlaf>`_
+- `Philip Bjorge <https://github.com/philipbjorge>`_
+- `Ilya Kazakov <https://github.com/mrKazzila>`_
+
 4.45.0
 --------
 - Add Starlette lifespan handler implementation (`#683 <https://github.com/ets-labs/python-dependency-injector/pull/683>`_).
@@ -340,8 +402,8 @@ Many thanks to `ZipFile <https://github.com/ZipFile>`_ for both contributions.
 - Make refactoring of wiring module and tests.
   See PR # `#406 <https://github.com/ets-labs/python-dependency-injector/issues/406>`_.
   Thanks to `@withshubh <https://github.com/withshubh>`_ for the contribution:
-    - Remove unused imports in tests.
-    - Use literal syntax to create data structure in tests.
+  - Remove unused imports in tests.
+  - Use literal syntax to create data structure in tests.
 - Add integration with a static analysis tool `DeepSource <https://deepsource.io/>`_.
 
 4.26.0
